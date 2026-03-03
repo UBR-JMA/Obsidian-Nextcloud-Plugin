@@ -1,0 +1,9 @@
+/* Obsidian Nextcloud Plugin styles */
+
+.nextcloud-settings .setting-item {
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.nextcloud-settings .setting-item:first-child {
+	border-top: none;
+}
