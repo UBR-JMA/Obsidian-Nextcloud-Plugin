@@ -1,0 +1,10 @@
+{
+	"id": "obsidian-nextcloud-plugin",
+	"name": "Nextcloud",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Interact with Nextcloud's API from within Obsidian.",
+	"author": "UBR-JMA",
+	"authorUrl": "https://github.com/UBR-JMA",
+	"isDesktopOnly": false
+}
