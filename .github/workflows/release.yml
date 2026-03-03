@@ -18,6 +18,7 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - run: npm ci
+      - run: npm test
       - run: npm run build
       - uses: softprops/action-gh-release@v2
         with:
