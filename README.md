@@ -98,6 +98,32 @@ The **cloud icon** in the left ribbon also opens the Create Event form directly.
 
 > The Nextcloud Notes app must be installed on your server for note creation to work.
 
+## Roadmap
+
+### Core Gaps
+
+- **Read/list operations** — The plugin is currently write-only. Display upcoming events, open tasks, and recent notes to make it useful as a daily driver, not just a quick-capture tool.
+- **Complete tasks** — CalDAV supports updating existing VTODOs. Add the ability to mark tasks created through the plugin as completed (`STATUS:COMPLETED`).
+- **Quick-capture from selection** — Pre-fill the event title, task title, or note content from selected text in the active note.
+- **Recurring events** — Add an `RRULE` field to event creation with a dropdown for common recurrences (daily, weekly, monthly).
+
+### Obsidian Integration
+
+- **Insert link after creation** — After creating an event, task, or note, offer to insert a summary line or link at the cursor position in the active note.
+- **Frontmatter pre-fill** — Parse YAML frontmatter from the active file to pre-fill fields (e.g. `title:` → event title, `date:` → start date).
+- **Daily Notes integration** — When the daily note is open, parse its unchecked tasks (`- [ ]`) and offer a bulk-push to Nextcloud.
+- **Two-way sync** — Fetch events and tasks from CalDAV and display them in a sidebar panel. The most complex item, but the most powerful.
+
+### Polish
+
+- **Calendar color indicators** — Calendar metadata already includes a `color` field; surface it as colored dots in the calendar dropdowns.
+- **Inline credential validation** — Validate credentials when the password field loses focus, rather than requiring a manual "Test connection" click.
+- **Offline queue** — If a CalDAV request fails due to connectivity, queue it locally and retry automatically when a connection is next available.
+
+### Architecture
+
+- **Split into multiple files** — As features are added, split `main.ts` into `caldav.ts`, `modals.ts`, `settings.ts`, and `main.ts` for maintainability.
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
