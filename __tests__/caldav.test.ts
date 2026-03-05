@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { requestUrl } from 'obsidian';
-import { parseCalendarPropfind, fetchCalendars, putCalendarObject, createNote } from '../src/caldav';
+import { parseCalendarPropfind, fetchCalendars, putCalendarObject, createNote, parseCalendarReport, fetchOpenTasks, fetchUpcomingEvents, updateCalendarObject } from '../src/caldav';
 
 const mockRequestUrl = vi.mocked(requestUrl);
 
@@ -519,5 +519,235 @@ describe('createNote', () => {
 	it('throws on HTTP 401 Unauthorized', async () => {
 		mockRequestUrl.mockResolvedValue({ status: 401 });
 		await expect(createNote('https://cloud.example.com', 'alice', 'wrongpass', { title: 'Note', content: '' })).rejects.toThrow('Notes API failed: HTTP 401');
+	});
+});
+
+// ─── parseCalendarReport ──────────────────────────────────────────────────────
+
+const REPORT_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<d:multistatus xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav">
+  <d:response>
+    <d:href>/remote.php/dav/calendars/alice/tasks/abc123.ics</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:getetag>"etag-abc"</d:getetag>
+        <cal:calendar-data>BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:abc123\r\nSUMMARY:Buy milk\r\nSTATUS:NEEDS-ACTION\r\nEND:VTODO\r\nEND:VCALENDAR</cal:calendar-data>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/remote.php/dav/calendars/alice/tasks/def456.ics</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:getetag>"etag-def"</d:getetag>
+        <cal:calendar-data>BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:def456\r\nSUMMARY:Call dentist\r\nSTATUS:NEEDS-ACTION\r\nEND:VTODO\r\nEND:VCALENDAR</cal:calendar-data>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>`;
+
+describe('parseCalendarReport', () => {
+	it('returns an empty array for empty XML', () => {
+		expect(parseCalendarReport('', 'https://cloud.example.com')).toEqual([]);
+	});
+
+	it('parses two items from a multi-status response', () => {
+		const items = parseCalendarReport(REPORT_XML, 'https://cloud.example.com');
+		expect(items).toHaveLength(2);
+	});
+
+	it('builds absolute URLs from server origin + href path', () => {
+		const items = parseCalendarReport(REPORT_XML, 'https://cloud.example.com');
+		expect(items[0].url).toBe('https://cloud.example.com/remote.php/dav/calendars/alice/tasks/abc123.ics');
+	});
+
+	it('extracts etag values', () => {
+		const items = parseCalendarReport(REPORT_XML, 'https://cloud.example.com');
+		expect(items[0].etag).toBe('"etag-abc"');
+		expect(items[1].etag).toBe('"etag-def"');
+	});
+
+	it('extracts raw icsData content', () => {
+		const items = parseCalendarReport(REPORT_XML, 'https://cloud.example.com');
+		expect(items[0].icsData).toContain('BEGIN:VTODO');
+		expect(items[0].icsData).toContain('SUMMARY:Buy milk');
+	});
+
+	it('skips responses that have no calendar-data', () => {
+		const xml = `<d:multistatus xmlns:d="DAV:">
+  <d:response>
+    <d:href>/cal/item.ics</d:href>
+    <d:propstat><d:prop><d:getetag>"e1"</d:getetag></d:prop></d:propstat>
+  </d:response>
+</d:multistatus>`;
+		expect(parseCalendarReport(xml, 'https://cloud.example.com')).toHaveLength(0);
+	});
+
+	it('uses the href as-is when it is already an absolute URL', () => {
+		const xml = `<d:multistatus xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav">
+  <d:response>
+    <d:href>https://other.example.com/cal/item.ics</d:href>
+    <d:propstat><d:prop>
+      <d:getetag>"e1"</d:getetag>
+      <cal:calendar-data>BEGIN:VCALENDAR\r\nEND:VCALENDAR</cal:calendar-data>
+    </d:prop></d:propstat>
+  </d:response>
+</d:multistatus>`;
+		const items = parseCalendarReport(xml, 'https://cloud.example.com');
+		expect(items[0].url).toBe('https://other.example.com/cal/item.ics');
+	});
+});
+
+// ─── updateCalendarObject ─────────────────────────────────────────────────────
+
+describe('updateCalendarObject', () => {
+	const ICS = 'BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nSTATUS:COMPLETED\r\nEND:VTODO\r\nEND:VCALENDAR';
+	const ITEM_URL = 'https://cloud.example.com/remote.php/dav/calendars/alice/tasks/abc123.ics';
+	const ETAG = '"etag-abc"';
+
+	it('calls requestUrl with PUT method', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 204 });
+		await updateCalendarObject(ITEM_URL, ETAG, ICS, 'alice', 'pass');
+		const call = mockRequestUrl.mock.calls[0][0] as Record<string, unknown>;
+		expect(call.method).toBe('PUT');
+	});
+
+	it('uses the exact item URL provided', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 204 });
+		await updateCalendarObject(ITEM_URL, ETAG, ICS, 'alice', 'pass');
+		const call = mockRequestUrl.mock.calls[0][0] as Record<string, unknown>;
+		expect(call.url).toBe(ITEM_URL);
+	});
+
+	it('sets If-Match header to the provided etag', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 204 });
+		await updateCalendarObject(ITEM_URL, ETAG, ICS, 'alice', 'pass');
+		const call = mockRequestUrl.mock.calls[0][0] as Record<string, unknown>;
+		expect((call.headers as Record<string, string>)['If-Match']).toBe(ETAG);
+	});
+
+	it('sets Content-Type: text/calendar header', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 204 });
+		await updateCalendarObject(ITEM_URL, ETAG, ICS, 'alice', 'pass');
+		const call = mockRequestUrl.mock.calls[0][0] as Record<string, unknown>;
+		expect((call.headers as Record<string, string>)['Content-Type']).toBe('text/calendar; charset=utf-8');
+	});
+
+	it('sets an Authorization header', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 204 });
+		await updateCalendarObject(ITEM_URL, ETAG, ICS, 'alice', 'pass');
+		const call = mockRequestUrl.mock.calls[0][0] as Record<string, unknown>;
+		expect((call.headers as Record<string, string>)['Authorization']).toMatch(/^Basic /);
+	});
+
+	it('resolves without error on HTTP 204', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 204 });
+		await expect(updateCalendarObject(ITEM_URL, ETAG, ICS, 'alice', 'pass')).resolves.toBeUndefined();
+	});
+
+	it('resolves without error on HTTP 200', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 200 });
+		await expect(updateCalendarObject(ITEM_URL, ETAG, ICS, 'alice', 'pass')).resolves.toBeUndefined();
+	});
+
+	it('throws on HTTP 412 Precondition Failed (etag mismatch)', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 412 });
+		await expect(updateCalendarObject(ITEM_URL, ETAG, ICS, 'alice', 'pass')).rejects.toThrow('Failed to update calendar object: HTTP 412');
+	});
+
+	it('throws on HTTP 403 Forbidden', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 403 });
+		await expect(updateCalendarObject(ITEM_URL, ETAG, ICS, 'alice', 'pass')).rejects.toThrow('Failed to update calendar object: HTTP 403');
+	});
+});
+
+// ─── fetchOpenTasks ───────────────────────────────────────────────────────────
+
+describe('fetchOpenTasks', () => {
+	const TASKS_XML = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav">
+  <d:response>
+    <d:href>/remote.php/dav/calendars/alice/tasks/open.ics</d:href>
+    <d:propstat><d:prop>
+      <d:getetag>"e1"</d:getetag>
+      <cal:calendar-data>BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:t1\r\nSUMMARY:Open task\r\nSTATUS:NEEDS-ACTION\r\nEND:VTODO\r\nEND:VCALENDAR</cal:calendar-data>
+    </d:prop></d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/remote.php/dav/calendars/alice/tasks/done.ics</d:href>
+    <d:propstat><d:prop>
+      <d:getetag>"e2"</d:getetag>
+      <cal:calendar-data>BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:t2\r\nSUMMARY:Done task\r\nSTATUS:COMPLETED\r\nEND:VTODO\r\nEND:VCALENDAR</cal:calendar-data>
+    </d:prop></d:propstat>
+  </d:response>
+</d:multistatus>`;
+
+	it('calls requestUrl with REPORT method', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 207, text: TASKS_XML });
+		await fetchOpenTasks('https://cloud.example.com/cal/', 'alice', 'pass');
+		const call = mockRequestUrl.mock.calls[0][0] as Record<string, unknown>;
+		expect(call.method).toBe('REPORT');
+	});
+
+	it('filters out COMPLETED tasks from the response', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 207, text: TASKS_XML });
+		const items = await fetchOpenTasks('https://cloud.example.com/cal/', 'alice', 'pass');
+		expect(items).toHaveLength(1);
+		expect(items[0].icsData).toContain('STATUS:NEEDS-ACTION');
+	});
+
+	it('sets Depth: 1 header', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 207, text: TASKS_XML });
+		await fetchOpenTasks('https://cloud.example.com/cal/', 'alice', 'pass');
+		const call = mockRequestUrl.mock.calls[0][0] as Record<string, unknown>;
+		expect((call.headers as Record<string, string>)['Depth']).toBe('1');
+	});
+
+	it('throws on non-2xx response', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 401, text: '' });
+		await expect(fetchOpenTasks('https://cloud.example.com/cal/', 'alice', 'pass')).rejects.toThrow('Task fetch failed: HTTP 401');
+	});
+});
+
+// ─── fetchUpcomingEvents ──────────────────────────────────────────────────────
+
+describe('fetchUpcomingEvents', () => {
+	const EVENTS_XML = `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav">
+  <d:response>
+    <d:href>/remote.php/dav/calendars/alice/personal/ev1.ics</d:href>
+    <d:propstat><d:prop>
+      <d:getetag>"e1"</d:getetag>
+      <cal:calendar-data>BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:ev1\r\nSUMMARY:Team Meeting\r\nDTSTART:20260305T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR</cal:calendar-data>
+    </d:prop></d:propstat>
+  </d:response>
+</d:multistatus>`;
+
+	it('calls requestUrl with REPORT method', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 207, text: EVENTS_XML });
+		await fetchUpcomingEvents('https://cloud.example.com/cal/', 'alice', 'pass');
+		const call = mockRequestUrl.mock.calls[0][0] as Record<string, unknown>;
+		expect(call.method).toBe('REPORT');
+	});
+
+	it('includes a time-range filter in the request body', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 207, text: EVENTS_XML });
+		await fetchUpcomingEvents('https://cloud.example.com/cal/', 'alice', 'pass', 7);
+		const call = mockRequestUrl.mock.calls[0][0] as Record<string, unknown>;
+		expect(call.body as string).toContain('time-range');
+	});
+
+	it('returns parsed calendar items', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 207, text: EVENTS_XML });
+		const items = await fetchUpcomingEvents('https://cloud.example.com/cal/', 'alice', 'pass');
+		expect(items).toHaveLength(1);
+		expect(items[0].icsData).toContain('SUMMARY:Team Meeting');
+	});
+
+	it('throws on non-2xx response', async () => {
+		mockRequestUrl.mockResolvedValue({ status: 500, text: '' });
+		await expect(fetchUpcomingEvents('https://cloud.example.com/cal/', 'alice', 'pass')).rejects.toThrow('Event fetch failed: HTTP 500');
 	});
 });

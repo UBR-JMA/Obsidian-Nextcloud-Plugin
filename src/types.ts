@@ -17,6 +17,12 @@ export interface NextcloudPluginSettings {
 	cachedCalendars: CalendarInfo[];
 }
 
+export interface CalDAVItem {
+	url: string;   // full URL to the .ics file
+	etag: string;  // ETag for conditional updates
+	icsData: string;
+}
+
 // ─── Defaults ─────────────────────────────────────────────────────────────────
 
 export const DEFAULT_SETTINGS: NextcloudPluginSettings = {

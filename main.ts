@@ -1,8 +1,30 @@
 import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, requestUrl } from 'obsidian';
-import { CalendarInfo, NextcloudPluginSettings, DEFAULT_SETTINGS } from './src/types';
+import { CalendarInfo, CalDAVItem, NextcloudPluginSettings, DEFAULT_SETTINGS } from './src/types';
 import { buildAuthHeader, normalizeServerUrl, generateUid, toDatetimeLocalString } from './src/utils';
-import { generateVEVENT, generateVTODO } from './src/ical';
-import { fetchCalendars, putCalendarObject, createNote } from './src/caldav';
+import { generateVEVENT, generateVTODO, parseICalProperty, markTaskCompleted, RecurrenceRule } from './src/ical';
+import { fetchCalendars, putCalendarObject, updateCalendarObject, createNote, fetchOpenTasks, fetchUpcomingEvents } from './src/caldav';
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function getEditorSelection(app: App): string {
+	const editor = app.workspace.activeEditor?.editor;
+	return editor?.getSelection() ?? '';
+}
+
+function formatICalDateForDisplay(dtstart: string): string {
+	if (!dtstart) return '';
+	// Strip any timezone param prefix (e.g. TZID=...) — parseICalProperty already strips params
+	const clean = dtstart.includes(':') ? dtstart.split(':').slice(-1)[0] : dtstart;
+	if (clean.length === 8) {
+		return `${clean.substring(0, 4)}-${clean.substring(4, 6)}-${clean.substring(6, 8)}`;
+	}
+	const year = clean.substring(0, 4);
+	const month = clean.substring(4, 6);
+	const day = clean.substring(6, 8);
+	const hour = clean.substring(9, 11);
+	const min = clean.substring(11, 13);
+	return `${year}-${month}-${day} ${hour}:${min}`;
+}
 
 // ─── Modals ──────────────────────────────────────────────────────────────────
 
@@ -13,6 +35,7 @@ class CreateEventModal extends Modal {
 	endDate = '';
 	description = '';
 	selectedCalendarUrl = '';
+	recurrence: RecurrenceRule = 'none';
 
 	constructor(app: App, plugin: NextcloudPlugin) {
 		super(app);
@@ -22,6 +45,10 @@ class CreateEventModal extends Modal {
 		const later = new Date(now.getTime() + 60 * 60 * 1000);
 		this.startDate = toDatetimeLocalString(now);
 		this.endDate = toDatetimeLocalString(later);
+
+		// Quick-capture: pre-fill title from selected text
+		const selection = getEditorSelection(app);
+		if (selection.trim()) this.title = selection.trim();
 	}
 
 	onOpen() {
@@ -30,9 +57,10 @@ class CreateEventModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('Title')
-			.addText(text => text
-				.setPlaceholder('Event title')
-				.onChange(val => { this.title = val; }));
+			.addText(text => {
+				text.setPlaceholder('Event title').setValue(this.title);
+				text.onChange(val => { this.title = val; });
+			});
 
 		new Setting(contentEl)
 			.setName('Start')
@@ -48,6 +76,17 @@ class CreateEventModal extends Modal {
 				text.inputEl.type = 'datetime-local';
 				text.inputEl.value = this.endDate;
 				text.onChange(val => { this.endDate = val; });
+			});
+
+		new Setting(contentEl)
+			.setName('Recurrence')
+			.addDropdown(drop => {
+				drop.addOption('none', 'None');
+				drop.addOption('daily', 'Daily');
+				drop.addOption('weekly', 'Weekly');
+				drop.addOption('monthly', 'Monthly');
+				drop.setValue(this.recurrence);
+				drop.onChange(val => { this.recurrence = val as RecurrenceRule; });
 			});
 
 		const calendars = this.plugin.settings.cachedCalendars.filter(c => c.supportsVEVENT);
@@ -95,7 +134,14 @@ class CreateEventModal extends Modal {
 		if (end <= start) { new Notice('End time must be after start time.'); return; }
 
 		const uid = generateUid();
-		const ics = generateVEVENT({ title: this.title, startDate: start, endDate: end, description: this.description, uid });
+		const ics = generateVEVENT({
+			title: this.title,
+			startDate: start,
+			endDate: end,
+			description: this.description,
+			uid,
+			recurrence: this.recurrence,
+		});
 
 		try {
 			await putCalendarObject(this.selectedCalendarUrl, uid, ics, this.plugin.settings.username, this.plugin.settings.password);
@@ -120,6 +166,10 @@ class CreateTaskModal extends Modal {
 		super(app);
 		this.plugin = plugin;
 		this.selectedCalendarUrl = plugin.settings.defaultCalendarUrl;
+
+		// Quick-capture: pre-fill title from selected text
+		const selection = getEditorSelection(app);
+		if (selection.trim()) this.title = selection.trim();
 	}
 
 	onOpen() {
@@ -128,9 +178,10 @@ class CreateTaskModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('Title')
-			.addText(text => text
-				.setPlaceholder('Task title')
-				.onChange(val => { this.title = val; }));
+			.addText(text => {
+				text.setPlaceholder('Task title').setValue(this.title);
+				text.onChange(val => { this.title = val; });
+			});
 
 		new Setting(contentEl)
 			.setName('Due date (optional)')
@@ -205,6 +256,10 @@ class CreateNoteModal extends Modal {
 		this.plugin = plugin;
 		const activeFile = app.workspace.getActiveFile();
 		if (activeFile) this.title = activeFile.basename;
+
+		// Quick-capture: pre-fill content from selected text
+		const selection = getEditorSelection(app);
+		if (selection.trim()) this.content = selection.trim();
 	}
 
 	onOpen() {
@@ -222,6 +277,7 @@ class CreateNoteModal extends Modal {
 			.setName('Content')
 			.addTextArea(ta => {
 				ta.setPlaceholder('Note content');
+				ta.setValue(this.content);
 				ta.onChange(val => { this.content = val; });
 				ta.inputEl.rows = 8;
 			});
@@ -243,6 +299,180 @@ class CreateNoteModal extends Modal {
 		} catch (e) {
 			new Notice(`Failed to create note: ${e instanceof Error ? e.message : String(e)}`);
 		}
+	}
+
+	onClose() { this.contentEl.empty(); }
+}
+
+class ListEventsModal extends Modal {
+	plugin: NextcloudPlugin;
+
+	constructor(app: App, plugin: NextcloudPlugin) {
+		super(app);
+		this.plugin = plugin;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.createEl('h2', { text: 'Upcoming Events (next 7 days)' });
+
+		const loadingEl = contentEl.createEl('p', { text: 'Loading…', cls: 'nextcloud-modal-loading' });
+
+		this.loadEvents(contentEl, loadingEl);
+	}
+
+	private async loadEvents(contentEl: HTMLElement, loadingEl: HTMLElement) {
+		const { serverUrl, username, password, cachedCalendars } = this.plugin.settings;
+
+		if (!serverUrl || !username || !password) {
+			loadingEl.setText('Configure Nextcloud settings first.');
+			return;
+		}
+
+		const eventCalendars = cachedCalendars.filter(c => c.supportsVEVENT);
+		if (eventCalendars.length === 0) {
+			loadingEl.setText('No calendars found. Refresh calendars in Settings.');
+			return;
+		}
+
+		try {
+			const results = await Promise.all(
+				eventCalendars.map(cal =>
+					fetchUpcomingEvents(cal.url, username, password, 7)
+						.then(items => items.map(item => ({ item, calName: cal.name })))
+						.catch(() => [] as { item: CalDAVItem; calName: string }[])
+				)
+			);
+
+			loadingEl.remove();
+
+			const entries = results.flat().sort((a, b) => {
+				const dtA = parseICalProperty(a.item.icsData, 'DTSTART');
+				const dtB = parseICalProperty(b.item.icsData, 'DTSTART');
+				return dtA.localeCompare(dtB);
+			});
+
+			if (entries.length === 0) {
+				contentEl.createEl('p', { text: 'No upcoming events in the next 7 days.' });
+				return;
+			}
+
+			const listEl = contentEl.createEl('div', { cls: 'nextcloud-item-list' });
+			for (const { item, calName } of entries) {
+				const summary = parseICalProperty(item.icsData, 'SUMMARY');
+				const dtstart = parseICalProperty(item.icsData, 'DTSTART');
+				const dtend = parseICalProperty(item.icsData, 'DTEND');
+
+				const rowEl = listEl.createEl('div', { cls: 'nextcloud-item-row' });
+				rowEl.createEl('span', { text: `[${calName}] `, cls: 'nextcloud-item-calendar' });
+				rowEl.createEl('strong', { text: summary });
+				rowEl.createEl('span', {
+					text: `  ${formatICalDateForDisplay(dtstart)} → ${formatICalDateForDisplay(dtend)}`,
+					cls: 'nextcloud-item-date',
+				});
+			}
+		} catch (e) {
+			loadingEl.setText(`Failed to load events: ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+
+	onClose() { this.contentEl.empty(); }
+}
+
+class ListTasksModal extends Modal {
+	plugin: NextcloudPlugin;
+
+	constructor(app: App, plugin: NextcloudPlugin) {
+		super(app);
+		this.plugin = plugin;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.createEl('h2', { text: 'Open Tasks' });
+
+		const loadingEl = contentEl.createEl('p', { text: 'Loading…', cls: 'nextcloud-modal-loading' });
+
+		this.loadTasks(contentEl, loadingEl);
+	}
+
+	private async loadTasks(contentEl: HTMLElement, loadingEl: HTMLElement) {
+		const { serverUrl, username, password, cachedCalendars } = this.plugin.settings;
+
+		if (!serverUrl || !username || !password) {
+			loadingEl.setText('Configure Nextcloud settings first.');
+			return;
+		}
+
+		const taskCalendars = cachedCalendars.filter(c => c.supportsVTODO);
+		if (taskCalendars.length === 0) {
+			loadingEl.setText('No task lists found. Refresh calendars in Settings.');
+			return;
+		}
+
+		try {
+			const results = await Promise.all(
+				taskCalendars.map(cal =>
+					fetchOpenTasks(cal.url, username, password)
+						.then(items => items.map(item => ({ item, cal })))
+						.catch(() => [] as { item: CalDAVItem; cal: CalendarInfo }[])
+				)
+			);
+
+			loadingEl.remove();
+
+			const entries = results.flat().sort((a, b) => {
+				const dueA = parseICalProperty(a.item.icsData, 'DUE') || 'z';
+				const dueB = parseICalProperty(b.item.icsData, 'DUE') || 'z';
+				return dueA.localeCompare(dueB);
+			});
+
+			if (entries.length === 0) {
+				contentEl.createEl('p', { text: 'No open tasks.' });
+				return;
+			}
+
+			const listEl = contentEl.createEl('div', { cls: 'nextcloud-item-list' });
+			for (const { item, cal } of entries) {
+				this.renderTaskRow(listEl, item, cal, username, password);
+			}
+		} catch (e) {
+			loadingEl.setText(`Failed to load tasks: ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+
+	private renderTaskRow(
+		listEl: HTMLElement,
+		item: CalDAVItem,
+		cal: CalendarInfo,
+		username: string,
+		password: string
+	) {
+		const summary = parseICalProperty(item.icsData, 'SUMMARY');
+		const due = parseICalProperty(item.icsData, 'DUE');
+
+		const rowEl = listEl.createEl('div', { cls: 'nextcloud-item-row' });
+		rowEl.createEl('span', { text: `[${cal.name}] `, cls: 'nextcloud-item-calendar' });
+		rowEl.createEl('strong', { text: summary });
+		if (due) {
+			rowEl.createEl('span', { text: `  due: ${formatICalDateForDisplay(due)}`, cls: 'nextcloud-item-date' });
+		}
+
+		const completeBtn = rowEl.createEl('button', { text: 'Complete', cls: 'nextcloud-complete-btn' });
+		completeBtn.addEventListener('click', async () => {
+			completeBtn.setText('Completing…');
+			completeBtn.disabled = true;
+			try {
+				const updatedIcs = markTaskCompleted(item.icsData);
+				await updateCalendarObject(item.url, item.etag, updatedIcs, username, password);
+				new Notice(`Task "${summary}" marked complete.`);
+				rowEl.remove();
+			} catch (e) {
+				new Notice(`Failed: ${e instanceof Error ? e.message : String(e)}`);
+				completeBtn.setText('Complete');
+				completeBtn.disabled = false;
+			}
+		});
 	}
 
 	onClose() { this.contentEl.empty(); }
@@ -282,6 +512,18 @@ export default class NextcloudPlugin extends Plugin {
 			id: 'create-nextcloud-note',
 			name: 'Create Nextcloud note',
 			callback: () => { new CreateNoteModal(this.app, this).open(); }
+		});
+
+		this.addCommand({
+			id: 'list-nextcloud-events',
+			name: 'List upcoming Nextcloud events',
+			callback: () => { new ListEventsModal(this.app, this).open(); }
+		});
+
+		this.addCommand({
+			id: 'list-nextcloud-tasks',
+			name: 'List open Nextcloud tasks',
+			callback: () => { new ListTasksModal(this.app, this).open(); }
 		});
 
 		this.addSettingTab(new NextcloudSettingTab(this.app, this));

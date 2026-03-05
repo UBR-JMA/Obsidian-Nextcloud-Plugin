@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { generateVEVENT, generateVTODO } from '../src/ical';
+import { generateVEVENT, generateVTODO, parseICalProperty, markTaskCompleted } from '../src/ical';
 
 const FIXED_START = new Date('2024-03-01T10:00:00.000Z');
 const FIXED_END = new Date('2024-03-01T11:00:00.000Z');
@@ -178,5 +178,127 @@ describe('generateVTODO', () => {
 		expect(result).toContain('VERSION:2.0');
 		expect(result).toContain('CALSCALE:GREGORIAN');
 		expect(result).toContain('METHOD:PUBLISH');
+	});
+});
+
+// ─── generateVEVENT recurrence ────────────────────────────────────────────────
+
+describe('generateVEVENT recurrence', () => {
+	it('omits RRULE when recurrence is "none"', () => {
+		const result = generateVEVENT({ title: 'Test', startDate: FIXED_START, endDate: FIXED_END, description: '', uid: TEST_UID, recurrence: 'none' });
+		expect(result).not.toContain('RRULE:');
+	});
+
+	it('omits RRULE when recurrence is omitted', () => {
+		const result = generateVEVENT({ title: 'Test', startDate: FIXED_START, endDate: FIXED_END, description: '', uid: TEST_UID });
+		expect(result).not.toContain('RRULE:');
+	});
+
+	it('adds RRULE:FREQ=DAILY for daily recurrence', () => {
+		const result = generateVEVENT({ title: 'Test', startDate: FIXED_START, endDate: FIXED_END, description: '', uid: TEST_UID, recurrence: 'daily' });
+		expect(result).toContain('RRULE:FREQ=DAILY');
+	});
+
+	it('adds RRULE:FREQ=WEEKLY for weekly recurrence', () => {
+		const result = generateVEVENT({ title: 'Test', startDate: FIXED_START, endDate: FIXED_END, description: '', uid: TEST_UID, recurrence: 'weekly' });
+		expect(result).toContain('RRULE:FREQ=WEEKLY');
+	});
+
+	it('adds RRULE:FREQ=MONTHLY for monthly recurrence', () => {
+		const result = generateVEVENT({ title: 'Test', startDate: FIXED_START, endDate: FIXED_END, description: '', uid: TEST_UID, recurrence: 'monthly' });
+		expect(result).toContain('RRULE:FREQ=MONTHLY');
+	});
+});
+
+// ─── parseICalProperty ────────────────────────────────────────────────────────
+
+describe('parseICalProperty', () => {
+	const ICS = [
+		'BEGIN:VCALENDAR',
+		'BEGIN:VTODO',
+		'UID:task-uid-123',
+		'SUMMARY:Buy groceries',
+		'STATUS:NEEDS-ACTION',
+		'DUE:20260310T170000Z',
+		'DESCRIPTION:Milk and eggs',
+		'END:VTODO',
+		'END:VCALENDAR',
+	].join('\r\n');
+
+	it('extracts a simple property value', () => {
+		expect(parseICalProperty(ICS, 'UID')).toBe('task-uid-123');
+	});
+
+	it('extracts SUMMARY', () => {
+		expect(parseICalProperty(ICS, 'SUMMARY')).toBe('Buy groceries');
+	});
+
+	it('extracts STATUS', () => {
+		expect(parseICalProperty(ICS, 'STATUS')).toBe('NEEDS-ACTION');
+	});
+
+	it('extracts DUE', () => {
+		expect(parseICalProperty(ICS, 'DUE')).toBe('20260310T170000Z');
+	});
+
+	it('returns empty string when property is not found', () => {
+		expect(parseICalProperty(ICS, 'RRULE')).toBe('');
+	});
+
+	it('handles properties with parameters (e.g. DTSTART;TZID=...)', () => {
+		const ics = 'BEGIN:VEVENT\r\nDTSTART;TZID=America/New_York:20260304T140000\r\nEND:VEVENT';
+		expect(parseICalProperty(ics, 'DTSTART')).toBe('20260304T140000');
+	});
+
+	it('unfolds long lines before parsing', () => {
+		const longVal = 'A'.repeat(80);
+		const folded = `SUMMARY:${'A'.repeat(75)}\r\n ${'A'.repeat(5)}`;
+		const ics = `BEGIN:VTODO\r\n${folded}\r\nEND:VTODO`;
+		expect(parseICalProperty(ics, 'SUMMARY')).toBe(longVal);
+	});
+});
+
+// ─── markTaskCompleted ────────────────────────────────────────────────────────
+
+describe('markTaskCompleted', () => {
+	const BASE_ICS = [
+		'BEGIN:VCALENDAR',
+		'BEGIN:VTODO',
+		'UID:task-uid-456',
+		'SUMMARY:Finish report',
+		'STATUS:NEEDS-ACTION',
+		'END:VTODO',
+		'END:VCALENDAR',
+	].join('\r\n');
+
+	it('replaces STATUS:NEEDS-ACTION with STATUS:COMPLETED', () => {
+		const result = markTaskCompleted(BASE_ICS);
+		expect(result).toContain('STATUS:COMPLETED');
+		expect(result).not.toContain('STATUS:NEEDS-ACTION');
+	});
+
+	it('adds a COMPLETED timestamp', () => {
+		const result = markTaskCompleted(BASE_ICS);
+		expect(result).toMatch(/COMPLETED:\d{8}T\d{6}Z/);
+	});
+
+	it('places COMPLETED before END:VTODO', () => {
+		const result = markTaskCompleted(BASE_ICS);
+		const completedIdx = result.indexOf('COMPLETED:');
+		const endVtodoIdx = result.indexOf('END:VTODO');
+		expect(completedIdx).toBeLessThan(endVtodoIdx);
+	});
+
+	it('adds STATUS:COMPLETED when no STATUS line is present', () => {
+		const ics = 'BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nSUMMARY:Task\r\nEND:VTODO\r\nEND:VCALENDAR';
+		const result = markTaskCompleted(ics);
+		expect(result).toContain('STATUS:COMPLETED');
+	});
+
+	it('does not add a second COMPLETED timestamp if one is already present', () => {
+		const icsWithCompleted = BASE_ICS.replace('STATUS:NEEDS-ACTION', 'STATUS:NEEDS-ACTION\r\nCOMPLETED:20260101T000000Z');
+		const result = markTaskCompleted(icsWithCompleted);
+		const count = (result.match(/^COMPLETED:/gm) ?? []).length;
+		expect(count).toBe(1);
 	});
 });

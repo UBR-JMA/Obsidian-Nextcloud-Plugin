@@ -1,6 +1,7 @@
 import { requestUrl } from 'obsidian';
-import { CalendarInfo } from './types';
+import { CalendarInfo, CalDAVItem } from './types';
 import { buildAuthHeader, normalizeServerUrl } from './utils';
+import { parseICalProperty } from './ical';
 
 // ─── CalDAV HTTP Functions ────────────────────────────────────────────────────
 
@@ -110,6 +111,30 @@ export async function putCalendarObject(
 	}
 }
 
+export async function updateCalendarObject(
+	itemUrl: string,
+	etag: string,
+	icsContent: string,
+	username: string,
+	password: string
+): Promise<void> {
+	const response = await requestUrl({
+		url: itemUrl,
+		method: 'PUT',
+		headers: {
+			'Authorization': buildAuthHeader(username, password),
+			'Content-Type': 'text/calendar; charset=utf-8',
+			'If-Match': etag,
+		},
+		body: icsContent,
+		throw: false,
+	});
+
+	if (response.status !== 200 && response.status !== 204) {
+		throw new Error(`Failed to update calendar object: HTTP ${response.status}`);
+	}
+}
+
 export async function createNote(
 	serverUrl: string,
 	username: string,
@@ -137,4 +162,123 @@ export async function createNote(
 	if (response.status < 200 || response.status >= 300) {
 		throw new Error(`Notes API failed: HTTP ${response.status}`);
 	}
+}
+
+// ─── CalDAV REPORT (read) Functions ──────────────────────────────────────────
+
+export function parseCalendarReport(xml: string, serverOrigin: string): CalDAVItem[] {
+	const items: CalDAVItem[] = [];
+	const responseRegex = /<[a-zA-Z]+:response[^>]*>([\s\S]*?)<\/[a-zA-Z]+:response>/gi;
+	let match: RegExpExecArray | null;
+
+	while ((match = responseRegex.exec(xml)) !== null) {
+		const block = match[1];
+
+		const hrefMatch = /<[a-zA-Z]+:href>([^<]+)<\/[a-zA-Z]+:href>/i.exec(block);
+		if (!hrefMatch) continue;
+		const path = hrefMatch[1].trim();
+
+		const etagMatch = /<[a-zA-Z]+:getetag>([^<]+)<\/[a-zA-Z]+:getetag>/i.exec(block);
+		const etag = etagMatch ? etagMatch[1].trim() : '';
+
+		const calDataMatch = /<[a-zA-Z]+:calendar-data>([\s\S]*?)<\/[a-zA-Z]+:calendar-data>/i.exec(block);
+		if (!calDataMatch) continue;
+		const icsData = calDataMatch[1].trim();
+
+		const url = path.startsWith('http') ? path : serverOrigin + path;
+		items.push({ url, etag, icsData });
+	}
+
+	return items;
+}
+
+export async function fetchOpenTasks(
+	calendarUrl: string,
+	username: string,
+	password: string
+): Promise<CalDAVItem[]> {
+	const base = calendarUrl.endsWith('/') ? calendarUrl : calendarUrl + '/';
+	const serverOrigin = new URL(calendarUrl).origin;
+
+	const body = `<?xml version="1.0" encoding="UTF-8"?>
+<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:prop>
+    <d:getetag/>
+    <c:calendar-data/>
+  </d:prop>
+  <c:filter>
+    <c:comp-filter name="VCALENDAR">
+      <c:comp-filter name="VTODO"/>
+    </c:comp-filter>
+  </c:filter>
+</c:calendar-query>`;
+
+	const response = await requestUrl({
+		url: base,
+		method: 'REPORT',
+		headers: {
+			'Authorization': buildAuthHeader(username, password),
+			'Depth': '1',
+			'Content-Type': 'application/xml; charset=utf-8',
+		},
+		body,
+		throw: false,
+	});
+
+	if (response.status < 200 || response.status >= 300) {
+		throw new Error(`Task fetch failed: HTTP ${response.status}`);
+	}
+
+	const items = parseCalendarReport(response.text, serverOrigin);
+	return items.filter(item => {
+		const status = parseICalProperty(item.icsData, 'STATUS');
+		return status !== 'COMPLETED' && status !== 'CANCELLED';
+	});
+}
+
+export async function fetchUpcomingEvents(
+	calendarUrl: string,
+	username: string,
+	password: string,
+	days = 7
+): Promise<CalDAVItem[]> {
+	const base = calendarUrl.endsWith('/') ? calendarUrl : calendarUrl + '/';
+	const serverOrigin = new URL(calendarUrl).origin;
+
+	const now = new Date();
+	const end = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+	const fmt = (d: Date) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+
+	const body = `<?xml version="1.0" encoding="UTF-8"?>
+<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:prop>
+    <d:getetag/>
+    <c:calendar-data/>
+  </d:prop>
+  <c:filter>
+    <c:comp-filter name="VCALENDAR">
+      <c:comp-filter name="VEVENT">
+        <c:time-range start="${fmt(now)}" end="${fmt(end)}"/>
+      </c:comp-filter>
+    </c:comp-filter>
+  </c:filter>
+</c:calendar-query>`;
+
+	const response = await requestUrl({
+		url: base,
+		method: 'REPORT',
+		headers: {
+			'Authorization': buildAuthHeader(username, password),
+			'Depth': '1',
+			'Content-Type': 'application/xml; charset=utf-8',
+		},
+		body,
+		throw: false,
+	});
+
+	if (response.status < 200 || response.status >= 300) {
+		throw new Error(`Event fetch failed: HTTP ${response.status}`);
+	}
+
+	return parseCalendarReport(response.text, serverOrigin);
 }
