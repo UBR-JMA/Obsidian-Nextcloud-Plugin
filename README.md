@@ -1,12 +1,16 @@
 # Obsidian Nextcloud Plugin
 
-Create calendar events, tasks, and notes in Nextcloud directly from Obsidian.
+Create and manage calendar events, tasks, and notes in Nextcloud directly from Obsidian.
 
 ## Features
 
-- Create calendar events with title, start/end time, description, and calendar selection
+- Create calendar events with title, start/end time, description, recurrence, and calendar selection
 - Create tasks (todos) with title, optional due date, and notes
 - Create notes via the Nextcloud Notes app
+- **List upcoming events** — view events from all your calendars for the next 7 days
+- **List open tasks** — view all incomplete tasks across your task lists, with one-click completion
+- **Quick-capture from selection** — selected text in the active note pre-fills event/task titles and note content
+- **Recurring events** — set daily, weekly, or monthly recurrence when creating an event
 - Persistent default calendar selection remembered across sessions
 - Works with any Nextcloud instance using CalDAV and the Notes app
 
@@ -72,6 +76,8 @@ All actions are available via the **Command palette** (`Ctrl/Cmd+P`):
 | Create Nextcloud event | Opens a form to create a calendar event |
 | Create Nextcloud task | Opens a form to create a task/todo |
 | Create Nextcloud note | Opens a form to create a note |
+| List upcoming Nextcloud events | Shows events from all calendars for the next 7 days |
+| List open Nextcloud tasks | Shows incomplete tasks across all task lists |
 | Test Nextcloud connection | Verifies your credentials and server URL |
 
 The **cloud icon** in the left ribbon also opens the Create Event form directly.
@@ -79,9 +85,13 @@ The **cloud icon** in the left ribbon also opens the Create Event form directly.
 ### Creating an event
 
 1. Run **Create Nextcloud event** from the command palette (or click the ribbon icon).
-2. Fill in the title, start time, end time, and optionally a description.
-3. Select the target calendar from the dropdown.
-4. Click **Create Event**.
+2. Fill in the title, start time, and end time.
+3. Optionally set a **Recurrence** (None / Daily / Weekly / Monthly).
+4. Optionally add a description.
+5. Select the target calendar from the dropdown.
+6. Click **Create Event**.
+
+**Tip:** Select text in the active note before opening the modal — it will be pre-filled as the event title.
 
 ### Creating a task
 
@@ -90,22 +100,29 @@ The **cloud icon** in the left ribbon also opens the Create Event form directly.
 3. Select the task list from the dropdown.
 4. Click **Create Task**.
 
+**Tip:** Selected text in the active note is pre-filled as the task title.
+
 ### Creating a note
 
 1. Run **Create Nextcloud note**.
 2. The title is pre-filled with the active file name if one is open.
 3. Add content and click **Create Note**.
 
-> The Nextcloud Notes app must be installed on your server for note creation to work.
+**Tip:** Selected text in the active note is pre-filled as the note content.
+
+### Listing upcoming events
+
+1. Run **List upcoming Nextcloud events**.
+2. The plugin fetches events from all your calendars for the next 7 days.
+3. Events are displayed sorted by start time, showing the calendar name, title, and time range.
+
+### Listing and completing tasks
+
+1. Run **List open Nextcloud tasks**.
+2. The plugin fetches all incomplete tasks across your task lists.
+3. Tasks are displayed sorted by due date. Click **Complete** on any row to mark it done — the task is updated on the server immediately.
 
 ## Roadmap
-
-### Core Gaps
-
-- **Read/list operations** — The plugin is currently write-only. Display upcoming events, open tasks, and recent notes to make it useful as a daily driver, not just a quick-capture tool.
-- **Complete tasks** — CalDAV supports updating existing VTODOs. Add the ability to mark tasks created through the plugin as completed (`STATUS:COMPLETED`).
-- **Quick-capture from selection** — Pre-fill the event title, task title, or note content from selected text in the active note.
-- **Recurring events** — Add an `RRULE` field to event creation with a dropdown for common recurrences (daily, weekly, monthly).
 
 ### Obsidian Integration
 
@@ -119,10 +136,6 @@ The **cloud icon** in the left ribbon also opens the Create Event form directly.
 - **Calendar color indicators** — Calendar metadata already includes a `color` field; surface it as colored dots in the calendar dropdowns.
 - **Inline credential validation** — Validate credentials when the password field loses focus, rather than requiring a manual "Test connection" click.
 - **Offline queue** — If a CalDAV request fails due to connectivity, queue it locally and retry automatically when a connection is next available.
-
-### Architecture
-
-- **Split into multiple files** — As features are added, split `main.ts` into `caldav.ts`, `modals.ts`, `settings.ts`, and `main.ts` for maintainability.
 
 ## License
 
